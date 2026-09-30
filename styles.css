@@ -163,3 +163,26 @@ textarea { min-height: 84px; resize: vertical; }
   .two-col { grid-template-columns: 1fr; gap: 0; }
   .commission-row { grid-template-columns: minmax(0,1fr) 108px; }
 }
+
+
+/* v3 future orders + daily money view */
+.status.waiting { background: #eef3ff; color: #355aa6; }
+.order-auto-note { margin-top: 9px; padding: 9px 10px; border-radius: 12px; background: #f2f5fb; color: #50617d; font-size: 12px; font-weight: 750; line-height: 1.45; }
+.reserve-mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.money-date-card { background: var(--card); border: 1px solid var(--line); border-radius: 22px; padding: 15px; box-shadow: var(--shadow); margin-bottom: 12px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; }
+.money-date-title { margin-top: 2px; font-size: 22px; font-weight: 900; }
+.date-mode-row { display: flex; gap: 7px; justify-content: flex-end; }
+.date-switcher { grid-column: 1 / -1; display: grid; grid-template-columns: 48px minmax(0,1fr) 48px; gap: 8px; align-items: center; }
+.date-switcher.dimmed { opacity: .62; }
+.date-switcher input { text-align: center; font-weight: 800; }
+.date-arrow { height: 46px; border: 1px solid var(--line); background: #f8f6f3; border-radius: 14px; font-size: 28px; line-height: 1; color: var(--text); }
+.money-stats .stat-card:first-child { border-color: #badbc4; background: #f8fdf9; }
+.money-stats .stat-card:first-child .stat-value { color: var(--green); }
+
+@media (max-width: 430px) {
+  .reserve-mode-grid { grid-template-columns: 1fr; }
+  .money-date-card { grid-template-columns: 1fr; }
+  .date-mode-row { justify-content: flex-start; }
+  .date-switcher { grid-column: 1; }
+  .money-table th, .money-table td { padding-left: 4px; padding-right: 4px; font-size: 11px; }
+}

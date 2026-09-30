@@ -16,3 +16,11 @@ Mobile-first web app for tracking school cookie inventory, orders, sales, paymen
 
 ## Important
 Before replacing files on GitHub, export a backup from the app. Code updates on the same GitHub Pages URL should preserve local data because the storage origin and key stay the same.
+
+
+## v3 update
+- Future orders can be saved even when there is not enough stock yet. Choose **Future order · auto-reserve** and the app will move the order to Reserved automatically once the full order is available.
+- Auto-reserve checks whenever stock is changed and whenever the app opens. Waiting orders are prioritized by due date, then creation time.
+- Money now shows **My profit** (sales revenue minus the brother commission locked into each sale).
+- Money has All time / Today controls, previous/next day arrows, and a date picker for daily totals.
+- The storage key is unchanged (`cookieTrackerDataV1`), so existing stock, orders, sales, commissions, and payment history remain on the same GitHub Pages app after updating.

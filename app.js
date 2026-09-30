@@ -1,7 +1,7 @@
 const BASE_PRICE = 6;
 const TAP_PRICE = 7;
 const STORAGE_KEY = 'cookieTrackerDataV1'; // Keep the same key so existing data survives updates.
-const APP_VERSION = 2;
+const APP_VERSION = 3;
 const DEFAULT_BROTHER_SHARE = 4;
 const DEFAULT_FLAVORS = [
   'Biscoff',
@@ -46,6 +46,8 @@ let sellMeta = { customer: '', paymentMethod: 'cash' };
 let orderDraft = {};
 let orderMeta = blankOrderMeta();
 let editingOrderId = null;
+let moneyViewDate = localDateKey(new Date());
+let moneyDateMode = 'all';
 
 const $ = (sel) => document.querySelector(sel);
 const main = $('#mainContent');
@@ -55,7 +57,7 @@ const modalCard = $('#modalCard');
 const importFile = $('#importFile');
 
 function blankOrderMeta() {
-  return { customer: '', contact: '', location: '', dueAt: '', note: '', paymentMethod: 'unpaid' };
+  return { customer: '', contact: '', location: '', dueAt: '', note: '', paymentMethod: 'unpaid', reserveMode: 'now' };
 }
 
 function loadState() {
@@ -86,6 +88,7 @@ function loadState() {
     merged.orders = Array.isArray(saved.orders) ? saved.orders.map(o => ({
       ...o,
       status: o.status || 'open',
+      reserveMode: o.reserveMode || (o.status === 'waiting' ? 'auto' : 'now'),
       paid: !!o.paid,
       paymentMethod: o.paymentMethod || (o.paid ? 'legacy' : 'unpaid'),
       contact: o.contact || '',
@@ -165,10 +168,53 @@ function dateText(value) {
 function activeFlavors() { return state.flavors.filter(f => f.active); }
 function flavorById(id) { return state.flavors.find(f => f.id === id); }
 function openOrders() { return state.orders.filter(o => o.status === 'open'); }
+function waitingOrders() { return state.orders.filter(o => o.status === 'waiting'); }
 function paymentLabel(method) { return PAYMENT_LABELS[method] || 'Unknown'; }
 function unitPriceForMethod(method) { return method === 'tap' ? TAP_PRICE : BASE_PRICE; }
 function orderPaid(order) { return (order.paymentMethod || 'unpaid') !== 'unpaid'; }
 function flavorBrotherShare(flavorId) { return Number(flavorById(flavorId)?.brotherShare ?? DEFAULT_BROTHER_SHARE); }
+
+function localDateKey(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function formatMoneyDate(key) {
+  const date = new Date(`${key}T12:00:00`);
+  if (Number.isNaN(date.getTime())) return key;
+  const today = localDateKey(new Date());
+  if (key === today) return 'Today';
+  return new Intl.DateTimeFormat('en-US', { weekday:'short', month:'short', day:'numeric' }).format(date);
+}
+
+function canReserveItems(items, excludingOrderId = null) {
+  return (items || []).every(item => Number(item.qty || 0) <= availableFor(item.flavorId, excludingOrderId));
+}
+
+function autoReserveWaitingOrders() {
+  const waiting = state.orders
+    .filter(o => o.status === 'waiting')
+    .sort((a, b) => {
+      const aDue = a.dueAt ? new Date(a.dueAt).getTime() : Number.POSITIVE_INFINITY;
+      const bDue = b.dueAt ? new Date(b.dueAt).getTime() : Number.POSITIVE_INFINITY;
+      if (aDue !== bDue) return aDue - bDue;
+      return new Date(a.createdAt) - new Date(b.createdAt);
+    });
+  const reserved = [];
+  for (const order of waiting) {
+    if (!canReserveItems(order.items, order.id)) continue;
+    order.status = 'open';
+    order.reserveMode = 'auto';
+    order.autoReservedAt = new Date().toISOString();
+    order.updatedAt = order.autoReservedAt;
+    reserved.push(order);
+  }
+  return reserved;
+}
 
 function reservedFor(flavorId, excludingOrderId = null) {
   return openOrders()
@@ -183,6 +229,7 @@ function availableFor(flavorId, excludingOrderId = null) {
 
 function totalOnHand() { return activeFlavors().reduce((s, f) => s + Number(f.stock || 0), 0); }
 function totalReserved() { return activeFlavors().reduce((s, f) => s + reservedFor(f.id), 0); }
+function totalWaitingQty() { return waitingOrders().reduce((s, o) => s + itemsQty(o.items), 0); }
 function totalSoldQty() { return state.sales.reduce((s, x) => s + itemsQty(x.items), 0); }
 function totalRevenue() { return state.sales.reduce((s, x) => s + Number(x.total || 0), 0); }
 function collectedRevenue() { return state.sales.filter(s => s.paid).reduce((a, s) => a + Number(s.total || 0), 0); }
@@ -241,7 +288,7 @@ function renderHome() {
     <section class="stat-grid">
       ${statCard('Sales', money(totalRevenue()), `${totalSoldQty()} cookies`)}
       ${statCard('Collected', money(collectedRevenue()), unpaidRevenue() ? `${money(unpaidRevenue())} unpaid` : 'Everything paid')}
-      ${statCard('Open orders', openOrders().length, `${openOrders().reduce((s, o) => s + itemsQty(o.items), 0)} cookies reserved`)}
+      ${statCard('Orders', openOrders().length + waitingOrders().length, `${openOrders().reduce((s, o) => s + itemsQty(o.items), 0)} reserved${waitingOrders().length ? ` · ${totalWaitingQty()} waiting` : ''}`)}
       ${statCard('Owe brother', money(Math.max(0, brotherBalance())), 'Commission varies by flavor')}
     </section>
 
@@ -307,9 +354,10 @@ function adjustStock(flavorId, delta) {
   }
   f.stock += delta;
   state.inventoryLog.push({ id: uid('inv'), flavorId, delta, createdAt: new Date().toISOString() });
+  const newlyReserved = autoReserveWaitingOrders();
   saveState();
   render();
-  toast(`${f.name}: ${delta > 0 ? '+' : ''}${delta}`);
+  toast(newlyReserved.length ? `${f.name}: ${delta > 0 ? '+' : ''}${delta} · ${newlyReserved.length} future order${newlyReserved.length === 1 ? '' : 's'} auto-reserved` : `${f.name}: ${delta > 0 ? '+' : ''}${delta}`);
 }
 
 function openStockModal(flavorId) {
@@ -332,10 +380,12 @@ function setStock(flavorId) {
   const delta = value - f.stock;
   f.stock = value;
   state.inventoryLog.push({ id: uid('inv'), flavorId, delta, createdAt: new Date().toISOString() });
-  saveState(); closeModal(); render(); toast('Stock updated');
+  const newlyReserved = autoReserveWaitingOrders();
+  saveState(); closeModal(); render(); toast(newlyReserved.length ? `Stock updated · ${newlyReserved.length} future order${newlyReserved.length === 1 ? '' : 's'} auto-reserved` : 'Stock updated');
 }
 
 function draftCapacity(type, flavorId) {
+  if (type === 'order' && orderMeta.reserveMode === 'auto') return Number.POSITIVE_INFINITY;
   if (type === 'order' && editingOrderId) return availableFor(flavorId, editingOrderId);
   return availableFor(flavorId);
 }
@@ -345,8 +395,10 @@ function renderQtyRows(draftName) {
   return activeFlavors().map(f => {
     const qty = draft[f.id] || 0;
     const capacity = draftCapacity(draftName, f.id);
+    const available = availableFor(f.id, draftName === 'order' ? editingOrderId : null);
+    const stockText = Number.isFinite(capacity) ? `${available} available` : `${available} available · can wait for stock`;
     return `<div class="qty-line">
-      <div><div class="flavor-name">${esc(f.name)}</div><div class="meta">${capacity} available · Brother ${money(f.brotherShare)}</div></div>
+      <div><div class="flavor-name">${esc(f.name)}</div><div class="meta">${stockText} · Brother ${money(f.brotherShare)}</div></div>
       <button class="qty-button" onclick="changeDraftQty('${draftName}','${f.id}',-1)">−</button>
       <div class="qty-value">${qty}</div>
       <button class="qty-button plus" onclick="changeDraftQty('${draftName}','${f.id}',1)">＋</button>
@@ -459,14 +511,14 @@ function recordSale() {
 
 function renderOrders() {
   const sorted = [...state.orders].sort((a, b) => {
-    const rank = { open: 0, fulfilled: 1, cancelled: 2 };
+    const rank = { open: 0, waiting: 1, fulfilled: 2, cancelled: 3 };
     const diff = (rank[a.status] ?? 3) - (rank[b.status] ?? 3);
     if (diff) return diff;
     return new Date(b.createdAt) - new Date(a.createdAt);
   });
   main.innerHTML = `
     <button class="btn primary full" onclick="openNewOrder()">＋ New order</button>
-    <div class="section-head"><div><h2>Orders</h2><div class="sub">Open orders reserve inventory. Delivered orders can be undone.</div></div></div>
+    <div class="section-head"><div><h2>Orders</h2><div class="sub">Reserved orders hold stock. Future orders auto-reserve once the full order is available.</div></div></div>
     ${sorted.length ? `<div class="card-list">${sorted.map(orderCard).join('')}</div>` : emptyState('🧾', 'No orders yet', 'Create an order to reserve cookies for someone.')}
   `;
 }
@@ -481,16 +533,23 @@ function orderCard(order) {
     order.location ? `Meet: ${esc(order.location)}` : ''
   ].filter(Boolean).join('<br>');
   const paymentClass = method === 'unpaid' ? 'unpaid' : 'paid';
+  const statusText = status === 'open' ? 'RESERVED' : status === 'waiting' ? 'WAITING STOCK' : status === 'fulfilled' ? 'DELIVERED' : 'CANCELLED';
   const paymentText = method === 'unpaid' ? 'UNPAID' : paymentLabel(method).toUpperCase();
   return `<div class="list-card">
     <div class="order-head">
       <div><div class="flavor-name">${esc(order.customer || 'Unnamed customer')}</div><div class="meta">${dateText(order.createdAt)}${status === 'fulfilled' && order.fulfilledAt ? ` · Delivered ${dateText(order.fulfilledAt)}` : ''}</div></div>
-      <div style="text-align:right"><div class="order-total">${money(total)}</div><span class="status ${status}">${status === 'open' ? 'OPEN' : status === 'fulfilled' ? 'DELIVERED' : 'CANCELLED'}</span></div>
+      <div style="text-align:right"><div class="order-total">${money(total)}</div><span class="status ${status}">${statusText}</span></div>
     </div>
     <div class="order-items">${esc(itemSummary(order.items))}${details ? `<div class="order-detail-block">${details}</div>` : ''}${order.note ? `<div class="order-note">${esc(order.note)}</div>` : ''}</div>
+    ${order.reserveMode === 'auto' ? `<div class="order-auto-note">${status === 'waiting' ? '⏳ Future order · auto-reserves when every cookie is available' : status === 'open' ? '✓ Future order · stock is reserved' : 'Future order'}</div>` : ''}
     <div style="margin-top:9px"><span class="status ${paymentClass}">${esc(paymentText)}</span></div>
     ${status === 'open' ? `<div class="order-actions">
       <button class="btn green small" onclick="fulfillOrder('${order.id}')">✓ Delivered</button>
+      <button class="btn secondary small" onclick="openEditOrder('${order.id}')">Edit</button>
+      <button class="btn ghost small" onclick="openOrderPayment('${order.id}')">Payment</button>
+      <button class="btn red small" onclick="cancelOrder('${order.id}')">Cancel</button>
+    </div>` : ''}
+    ${status === 'waiting' ? `<div class="order-actions">
       <button class="btn secondary small" onclick="openEditOrder('${order.id}')">Edit</button>
       <button class="btn ghost small" onclick="openOrderPayment('${order.id}')">Payment</button>
       <button class="btn red small" onclick="cancelOrder('${order.id}')">Cancel</button>
@@ -513,7 +572,7 @@ function openNewOrder() {
 
 function openEditOrder(orderId) {
   const order = state.orders.find(o => o.id === orderId);
-  if (!order || order.status !== 'open') return;
+  if (!order || !['open','waiting'].includes(order.status)) return;
   editingOrderId = orderId;
   orderDraft = Object.fromEntries(order.items.map(i => [i.flavorId, i.qty]));
   orderMeta = {
@@ -522,7 +581,8 @@ function openEditOrder(orderId) {
     location: order.location || '',
     dueAt: order.dueAt || '',
     note: order.note || '',
-    paymentMethod: order.paymentMethod || (order.paid ? 'legacy' : 'unpaid')
+    paymentMethod: order.paymentMethod || (order.paid ? 'legacy' : 'unpaid'),
+    reserveMode: order.reserveMode || (order.status === 'waiting' ? 'auto' : 'now')
   };
   showModal('');
   renderOrderComposer();
@@ -531,6 +591,12 @@ function openEditOrder(orderId) {
 function setOrderPayment(method) {
   captureOrderMeta();
   orderMeta.paymentMethod = method;
+  renderOrderComposer();
+}
+
+function setOrderReserveMode(mode) {
+  captureOrderMeta();
+  orderMeta.reserveMode = mode === 'auto' ? 'auto' : 'now';
   renderOrderComposer();
 }
 
@@ -546,6 +612,13 @@ function renderOrderComposer() {
       <div class="field"><label>Meet location (optional)</label><input id="orderLocation" placeholder="Lunch, class, hallway…" value="${esc(orderMeta.location)}"></div>
     </div>
     <div class="field"><label>Due / meet time (optional)</label><input id="orderDueAt" type="datetime-local" value="${esc(orderMeta.dueAt)}"></div>
+    <div class="field">
+      <label>Inventory reservation</label>
+      <div class="reserve-mode-grid">
+        <button type="button" class="payment-choice ${orderMeta.reserveMode !== 'auto' ? 'selected' : ''}" onclick="setOrderReserveMode('now')"><span class="payment-title">Reserve now</span><span class="payment-sub">Only save if all cookies are available now</span></button>
+        <button type="button" class="payment-choice ${orderMeta.reserveMode === 'auto' ? 'selected' : ''}" onclick="setOrderReserveMode('auto')"><span class="payment-title">Future order · auto-reserve</span><span class="payment-sub">Save even if stock is short; reserve the full order automatically once ready</span></button>
+      </div>
+    </div>
     <div class="form-card" style="box-shadow:none;margin-bottom:12px"><h3 style="margin-bottom:7px">Cookies</h3>${renderQtyRows('order')}</div>
     <div class="field"><label>Payment</label>${paymentButtons(method, 'order')}</div>
     <div class="field"><label>Notes (optional)</label><textarea id="orderNote" placeholder="Class period, special instructions, reminder…">${esc(orderMeta.note)}</textarea></div>
@@ -560,14 +633,17 @@ function saveOrder() {
   const customer = orderMeta.customer.trim();
   if (!customer) return toast('Enter the customer name.');
   if (!items.length) return toast('Choose at least one cookie.');
-  for (const item of items) {
-    const capacity = availableFor(item.flavorId, editingOrderId);
-    if (item.qty > capacity) return toast(`Not enough ${flavorById(item.flavorId)?.name} available.`);
+  if (orderMeta.reserveMode !== 'auto') {
+    for (const item of items) {
+      const capacity = availableFor(item.flavorId, editingOrderId);
+      if (item.qty > capacity) return toast(`Not enough ${flavorById(item.flavorId)?.name} available.`);
+    }
   }
+  const nextStatus = orderMeta.reserveMode === 'auto' && !canReserveItems(items, editingOrderId) ? 'waiting' : 'open';
 
   if (editingOrderId) {
     const order = state.orders.find(o => o.id === editingOrderId);
-    if (!order || order.status !== 'open') return toast('That order can no longer be edited.');
+    if (!order || !['open','waiting'].includes(order.status)) return toast('That order can no longer be edited.');
     Object.assign(order, {
       customer,
       contact: orderMeta.contact.trim(),
@@ -577,15 +653,20 @@ function saveOrder() {
       paymentMethod: orderMeta.paymentMethod,
       paid: orderMeta.paymentMethod !== 'unpaid',
       items,
+      reserveMode: orderMeta.reserveMode,
+      status: nextStatus,
       updatedAt: new Date().toISOString()
     });
+    if (nextStatus === 'open' && orderMeta.reserveMode === 'auto') order.autoReservedAt = order.autoReservedAt || new Date().toISOString();
+    if (nextStatus === 'waiting') delete order.autoReservedAt;
+    autoReserveWaitingOrders();
     saveState();
     editingOrderId = null;
     orderDraft = {};
     orderMeta = blankOrderMeta();
     closeModal();
     render();
-    toast('Order updated');
+    toast(nextStatus === 'waiting' ? 'Future order saved · waiting for full stock' : 'Order updated and reserved');
     return;
   }
 
@@ -599,15 +680,18 @@ function saveOrder() {
     note: orderMeta.note.trim(),
     paymentMethod: orderMeta.paymentMethod,
     paid: orderMeta.paymentMethod !== 'unpaid',
-    status:'open',
+    reserveMode: orderMeta.reserveMode,
+    status: nextStatus,
+    autoReservedAt: nextStatus === 'open' && orderMeta.reserveMode === 'auto' ? new Date().toISOString() : undefined,
     createdAt:new Date().toISOString()
   });
+  autoReserveWaitingOrders();
   saveState();
   orderDraft = {};
   orderMeta = blankOrderMeta();
   closeModal();
   navTo('orders');
-  toast('Order saved and inventory reserved');
+  toast(nextStatus === 'waiting' ? 'Future order saved · it will auto-reserve when fully in stock' : 'Order saved and inventory reserved');
 }
 
 function openOrderPayment(orderId) {
@@ -701,30 +785,38 @@ function undoFulfillOrder(orderId) {
 
 function cancelOrder(orderId) {
   const order = state.orders.find(o => o.id === orderId);
-  if (!order || order.status !== 'open') return;
-  if (!confirm(`Cancel ${order.customer}'s order? Reserved cookies will become available again.`)) return;
+  if (!order || !['open','waiting'].includes(order.status)) return;
+  if (!confirm(`Cancel ${order.customer}'s order?${order.status === 'open' ? ' Reserved cookies will become available again.' : ''}`)) return;
+  order.cancelledFromStatus = order.status;
   order.status = 'cancelled';
   order.cancelledAt = new Date().toISOString();
+  const newlyReserved = autoReserveWaitingOrders();
   saveState();
   render();
-  toast('Order cancelled');
+  toast(newlyReserved.length ? `Order cancelled · ${newlyReserved.length} future order${newlyReserved.length === 1 ? '' : 's'} auto-reserved` : 'Order cancelled');
 }
 
 function restoreOrder(orderId) {
   const order = state.orders.find(o => o.id === orderId);
   if (!order || order.status !== 'cancelled') return;
-  for (const item of order.items) if (item.qty > availableFor(item.flavorId)) return toast(`Not enough ${flavorById(item.flavorId)?.name} available to restore this order.`);
-  order.status = 'open';
+  const auto = order.reserveMode === 'auto';
+  if (!auto) {
+    for (const item of order.items) if (item.qty > availableFor(item.flavorId)) return toast(`Not enough ${flavorById(item.flavorId)?.name} available to restore this order.`);
+  }
+  order.status = auto && !canReserveItems(order.items, order.id) ? 'waiting' : 'open';
+  if (order.status === 'open' && auto) order.autoReservedAt = new Date().toISOString();
   delete order.cancelledAt;
+  delete order.cancelledFromStatus;
   order.updatedAt = new Date().toISOString();
+  autoReserveWaitingOrders();
   saveState();
   render();
-  toast('Order restored');
+  toast(order.status === 'waiting' ? 'Future order restored · waiting for stock' : 'Order restored and reserved');
 }
 
-function salesByFlavor() {
+function salesByFlavor(sales = state.sales) {
   const map = new Map(state.flavors.map(f => [f.id, { qty:0, revenue:0, brother:0 }]));
-  state.sales.forEach(sale => {
+  sales.forEach(sale => {
     const unitPrice = Number(sale.unitPrice || (itemsQty(sale.items) ? sale.total / itemsQty(sale.items) : BASE_PRICE));
     sale.items.forEach(i => {
       const current = map.get(i.flavorId) || { qty:0, revenue:0, brother:0 };
@@ -737,25 +829,84 @@ function salesByFlavor() {
   return activeFlavors().map(f => ({ f, ...(map.get(f.id) || { qty:0, revenue:0, brother:0 }) })).sort((a, b) => b.qty - a.qty);
 }
 
-function paymentTotals() {
+function paymentTotals(sales = state.sales) {
   const totals = { cash:0, apple:0, tap:0, unpaid:0, legacy:0 };
-  state.sales.forEach(s => {
+  sales.forEach(s => {
     const method = s.paymentMethod || (s.paid ? 'legacy' : 'unpaid');
     totals[method] = (totals[method] || 0) + Number(s.total || 0);
   });
   return totals;
 }
 
+function salesRevenue(sales) { return (sales || []).reduce((sum, sale) => sum + Number(sale.total || 0), 0); }
+function salesBrother(sales) { return (sales || []).reduce((sum, sale) => sum + Number(sale.brotherTotal ?? brotherForItems(sale.items)), 0); }
+function salesProfit(sales) { return salesRevenue(sales) - salesBrother(sales); }
+function salesQty(sales) { return (sales || []).reduce((sum, sale) => sum + itemsQty(sale.items), 0); }
+function salesCollected(sales) { return (sales || []).filter(s => s.paid).reduce((sum, sale) => sum + Number(sale.total || 0), 0); }
+
+function setMoneyDate(value) {
+  if (!value) return;
+  moneyViewDate = value;
+  moneyDateMode = 'day';
+  renderMoney();
+}
+
+function changeMoneyDate(delta) {
+  const base = new Date(`${moneyViewDate}T12:00:00`);
+  if (Number.isNaN(base.getTime())) return;
+  base.setDate(base.getDate() + delta);
+  moneyViewDate = localDateKey(base);
+  moneyDateMode = 'day';
+  renderMoney();
+}
+
+function showTodayMoney() {
+  moneyViewDate = localDateKey(new Date());
+  moneyDateMode = 'day';
+  renderMoney();
+}
+
+function showAllMoney() {
+  moneyDateMode = 'all';
+  renderMoney();
+}
+
 function renderMoney() {
-  const rows = salesByFlavor();
-  const recent = [...state.sales].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  const payments = paymentTotals();
+  const filteredSales = moneyDateMode === 'all'
+    ? [...state.sales]
+    : state.sales.filter(sale => localDateKey(sale.createdAt) === moneyViewDate);
+  const rows = salesByFlavor(filteredSales);
+  const recent = [...filteredSales].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const payments = paymentTotals(filteredSales);
+  const revenue = salesRevenue(filteredSales);
+  const brother = salesBrother(filteredSales);
+  const profit = salesProfit(filteredSales);
+  const qty = salesQty(filteredSales);
+  const collected = salesCollected(filteredSales);
+  const unpaid = revenue - collected;
+  const periodLabel = moneyDateMode === 'all' ? 'All time' : formatMoneyDate(moneyViewDate);
   main.innerHTML = `
-    <section class="stat-grid">
-      ${statCard('Revenue', money(totalRevenue()), `${totalSoldQty()} sold`)}
-      ${statCard('Collected', money(collectedRevenue()), unpaidRevenue() ? `${money(unpaidRevenue())} still unpaid` : 'No unpaid sales')}
-      ${statCard('Brother total', money(totalBrotherOwed()), 'Based on each flavor’s commission')}
-      ${statCard('Still owe', money(Math.max(0, brotherBalance())), `${money(totalBrotherPaid())} recorded paid`)}
+    <div class="money-date-card">
+      <div>
+        <div class="meta">VIEWING</div>
+        <div class="money-date-title">${esc(periodLabel)}</div>
+      </div>
+      <div class="date-mode-row">
+        <button class="btn ${moneyDateMode === 'all' ? 'primary' : 'ghost'} small" onclick="showAllMoney()">All time</button>
+        <button class="btn ${moneyDateMode === 'day' ? 'primary' : 'ghost'} small" onclick="showTodayMoney()">Today</button>
+      </div>
+      <div class="date-switcher ${moneyDateMode === 'all' ? 'dimmed' : ''}">
+        <button class="date-arrow" onclick="changeMoneyDate(-1)" aria-label="Previous day">‹</button>
+        <input type="date" value="${esc(moneyViewDate)}" onchange="setMoneyDate(this.value)">
+        <button class="date-arrow" onclick="changeMoneyDate(1)" aria-label="Next day">›</button>
+      </div>
+    </div>
+
+    <section class="stat-grid money-stats">
+      ${statCard('My profit', money(profit), `${qty} cookie${qty === 1 ? '' : 's'} · revenue minus brother share`)}
+      ${statCard('Revenue', money(revenue), unpaid > 0 ? `${money(unpaid)} unpaid` : `${money(collected)} collected`)}
+      ${statCard('Brother share', money(brother), `${periodLabel}`)}
+      ${statCard('Still owe', money(Math.max(0, brotherBalance())), `${money(totalBrotherPaid())} paid overall`)}
     </section>
 
     <div class="form-card">
@@ -769,19 +920,19 @@ function renderMoney() {
     </div>
 
     <div class="form-card">
-      <div class="section-head" style="margin-top:0"><div><h2>Pay brother</h2><div class="sub">Record money you've handed over</div></div></div>
+      <div class="section-head" style="margin-top:0"><div><h2>Pay brother</h2><div class="sub">Record money you've handed over · balance above is always all-time</div></div></div>
       <div style="display:grid;grid-template-columns:1fr auto;gap:8px"><input id="brotherPayment" type="number" min="0" step="0.01" inputmode="decimal" placeholder="Amount"><button class="btn primary" onclick="recordBrotherPayment()">Add</button></div>
     </div>
 
     <div class="form-card">
-      <h2>Sales by flavor</h2>
-      <table class="money-table"><thead><tr><th>Flavor</th><th>Sold</th><th>Sales</th><th>Brother</th></tr></thead><tbody>
-      ${rows.map(r => `<tr><td>${esc(r.f.name)}</td><td>${r.qty}</td><td>${money(r.revenue)}</td><td>${money(r.brother)}</td></tr>`).join('')}
+      <h2>Sales by flavor · ${esc(periodLabel)}</h2>
+      <table class="money-table"><thead><tr><th>Flavor</th><th>Sold</th><th>Sales</th><th>Brother</th><th>Mine</th></tr></thead><tbody>
+      ${rows.map(r => `<tr><td>${esc(r.f.name)}</td><td>${r.qty}</td><td>${money(r.revenue)}</td><td>${money(r.brother)}</td><td>${money(r.revenue - r.brother)}</td></tr>`).join('')}
       </tbody></table>
     </div>
 
-    <div class="section-head"><div><h2>Sales history</h2><div class="sub">Shows payment method and sale price</div></div></div>
-    ${recent.length ? `<div class="card-list">${recent.map(saleCard).join('')}</div>` : emptyState('💵', 'No money tracked yet', 'Complete a sale to start your totals.')}
+    <div class="section-head"><div><h2>Sales history</h2><div class="sub">${esc(periodLabel)} · payment method and sale price</div></div></div>
+    ${recent.length ? `<div class="card-list">${recent.map(saleCard).join('')}</div>` : emptyState('💵', 'No sales for this date', moneyDateMode === 'all' ? 'Complete a sale to start your totals.' : 'Use the arrows or date picker to view another day.')}
   `;
 }
 
@@ -942,6 +1093,7 @@ importFile.addEventListener('change', async (e) => {
     if (!Array.isArray(parsed.flavors) || !Array.isArray(parsed.sales) || !Array.isArray(parsed.orders)) throw new Error('Invalid backup');
     localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
     state = loadState();
+    autoReserveWaitingOrders();
     saveState();
     closeModal();
     render();
@@ -1006,5 +1158,6 @@ if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   });
 }
 
+autoReserveWaitingOrders();
 saveState(); // Runs migrations without changing the storage key or wiping existing data.
 render();
