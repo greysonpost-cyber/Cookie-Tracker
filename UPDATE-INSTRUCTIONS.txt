@@ -1,19 +1,28 @@
-COOKIE TRACKER v3 UPDATE
+COOKIE TRACKER v4 UPDATE
 
-1. In GitHub, open your Cookie-Tracker repository.
-2. Replace these files in the repository root with the v3 copies:
+1. In the current Cookie Tracker app, go to Settings and export a backup. Keep it until the update is confirmed working.
+2. In GitHub, open the Cookie-Tracker repository.
+3. Replace these files in the repository root with the v4 copies:
    - index.html
    - app.js
    - styles.css
    - sw.js
    - README.md (optional, but recommended)
-3. Keep manifest.webmanifest and the icons folder as they are.
-4. Commit the changes to main. GitHub Pages will redeploy automatically.
-5. After the deployment finishes, fully close Cookie Tracker and reopen it.
+4. Keep manifest.webmanifest and the icons folder as they are.
+5. Commit the changes to main. GitHub Pages will redeploy automatically.
+6. After deployment finishes, fully close Cookie Tracker and reopen it.
    If it still looks old, open the GitHub Pages URL in Safari, refresh once,
    then reopen the Home Screen app.
 
 DATA SAFETY
-- The storage key remains cookieTrackerDataV1, so this update is designed to
-  keep the existing inventory, commissions, orders, sales, and brother payments.
-- Keep your exported JSON backup until you have confirmed the update works.
+- The storage key remains cookieTrackerDataV1, so this update is designed to keep
+  existing inventory, commissions, orders, sales, brother payments, and settings.
+- Existing transactions migrate as No discount with $0 discount.
+- Keep the exported JSON backup until you confirm the update works.
+
+V4 PRICING RULE
+- Discounts and custom deals are selected manually per order/sale.
+- A reason is required.
+- The discount reduces the brother's commission by the same dollar amount.
+- Your profit therefore stays unchanged by the discount.
+- A discount cannot exceed the brother commission available on that transaction.
