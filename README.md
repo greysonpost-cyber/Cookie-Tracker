@@ -1,28 +1,27 @@
-# Cookie Tracker v4
+# Cookie Tracker v6 — regular + jumbo, adjustable prices and cuts
 
-Mobile-first web app for tracking school cookie inventory, reserved/future orders, sales, payment methods, discounts/deals, profit, and the amount owed to a brother/partner.
+This is a **full app** update that includes everything from v5 (which you never installed): rename a cookie, change its payouts, delete/archive an empty inactive cookie, and restore it later.
 
-## Existing features retained
-- Existing local data is preserved by keeping the same `cookieTrackerDataV1` localStorage key.
-- Each cookie flavor has its own brother commission amount.
-- Cash and Apple Pay sales are $6 per cookie; Tap to Pay is $7 per cookie.
-- Direct sales record the payment method.
-- Orders can store customer contact, meet location, due time, notes, payment method, and cookie quantities.
-- Open orders can be edited; delivered orders can be undone; cancelled orders can be restored.
-- Future orders can wait for stock and auto-reserve only when the complete order is available.
-- Money shows daily/all-time revenue, brother share, payment methods, and **My profit**.
+## What's new
 
-## v4 discounts + custom deals
-- A direct sale or order can use **No discount**, a **$ Discount**, or a **Custom deal**.
-- Discounts/deals are never selected automatically. The seller must choose one for that transaction.
-- A reason is required whenever a discount or deal is used.
-- The discount reduces the brother commission by the exact same amount, so the seller's profit does not decrease.
-- The app blocks a discount that is larger than the brother commission available on that transaction.
-- Custom deals are created in Settings with a cookie quantity and final deal price (example: 4 cookies for $20).
-- A custom deal currently requires the transaction to contain exactly the deal quantity. This prevents accidental deal application to the wrong quantity.
-- Tap to Pay still adds the existing $1-per-cookie premium; a custom deal reduces the $6 base price by its saved deal discount. Example: a 4-for-$20 deal is a $4 discount, so it totals $20 with Cash/Apple Pay or $24 with Tap to Pay.
-- Sales history and CSV exports include the discount amount, type/deal, reason, brother total, and seller profit.
-- Existing orders/sales are migrated as `No discount` and remain unchanged.
+- Regular and **Jumbo (8 oz)** entries for the same flavor. Each size has separate inventory, reservations, cash/Apple Pay price, Tap to Pay price, and brother cut.
+- Inventory → **+ Jumbo** next to an existing regular flavor pre-fills a new 8 oz option at $7 cash, $8 Tap, brother $5, mine $2. Every number is editable.
+- Inventory → **Edit** to rename, change size, change both customer prices, adjust your share or your brother's share, or remove unused cookies. Editing one cut updates the other so the two add up to the cash price.
+- Sales and Orders offer an optional **Custom charge** control to enter an actual final charge and reason, while keeping the brother payout fixed. For example, $7 regular price, $5 brother share, $2 your share becomes $10 actual charge, $5 brother share, $5 your share. **The actual $10 sale and $5 profit appear in Money, orders, and exports**. This is intentional so the records stay accurate.
+- Previous features preserved: custom deals, discounts, payments, future auto-reserved orders, undo delivery, daily profit filtering and backups.
 
-## Important
-Before replacing files on GitHub, export a backup from the app. Code updates on the same GitHub Pages URL should preserve local data because the storage origin and key stay the same.
+## How to update your GitHub Pages site
+
+**First:** On the existing Home Screen app, export a JSON backup (Settings → Export backup) and store it privately in Files/iCloud Drive. Do not upload backups to public GitHub.
+
+1. Extract `Cookie_Tracker_Update_v6.zip` on your device.
+2. In your GitHub `Cookie-Tracker` repository, replace **at repository root**: `app.js`, `index.html`, `styles.css`, `sw.js`, `README.md`.
+3. Commit the changes to the branch that GitHub Pages publishes (typically `main`). Do not delete or replace your `icons` folder or `manifest.webmanifest` when using the update-only zip.
+4. After GitHub's Pages deployment succeeds, fully close and reopen the Home Screen app. If it still shows the old version, refresh your existing Pages URL in Safari and reopen.
+5. Confirm your old inventory/orders/sales/commissions are still there. Keep the export backup for recovery.
+
+## Data protection and limits
+
+The application intentionally retains the existing `cookieTrackerDataV1` key, with migration for older flavor entries that had no size/prices. Historical sales totals and brother commissions are not rewritten. Local browser storage is not a cloud backup; use Export Backup to protect your data. A website update alone does not sync data across devices.
+
+**Accounting:** Revenue, payments, your profit, and sales CSV always reflect the real amount charged. You can set any legitimate selling price, fee or payout, but the app does not include hidden or falsified accounting views.

@@ -1,7 +1,7 @@
 const BASE_PRICE = 6;
 const TAP_PRICE = 7;
 const STORAGE_KEY = 'cookieTrackerDataV1'; // Keep the same key so existing data survives updates.
-const APP_VERSION = 4;
+const APP_VERSION = 6;
 const DEFAULT_BROTHER_SHARE = 4;
 const DEFAULT_FLAVORS = [
   'Biscoff',
@@ -30,7 +30,10 @@ const defaultState = () => ({
     name,
     stock: 0,
     active: true,
-    brotherShare: DEFAULT_BROTHER_SHARE
+    brotherShare: DEFAULT_BROTHER_SHARE,
+    size: 'Regular',
+    priceCash: BASE_PRICE,
+    priceTap: TAP_PRICE
   })),
   orders: [],
   sales: [],
@@ -58,11 +61,11 @@ const modalCard = $('#modalCard');
 const importFile = $('#importFile');
 
 function blankSaleMeta() {
-  return { customer: '', paymentMethod: 'cash', pricingMode: 'none', discountAmount: '', discountReason: '', dealId: '', dealSnapshot: null };
+  return { customer: '', paymentMethod: 'cash', pricingMode: 'none', discountAmount: '', discountReason: '', dealId: '', dealSnapshot: null, chargeEnabled:false, priceOverrideTotal:'', chargeReason:'' };
 }
 
 function blankOrderMeta() {
-  return { customer: '', contact: '', location: '', dueAt: '', note: '', paymentMethod: 'unpaid', reserveMode: 'now', pricingMode: 'none', discountAmount: '', discountReason: '', dealId: '', dealSnapshot: null };
+  return { customer: '', contact: '', location: '', dueAt: '', note: '', paymentMethod: 'unpaid', reserveMode: 'now', pricingMode: 'none', discountAmount: '', discountReason: '', dealId: '', dealSnapshot: null, chargeEnabled:false, priceOverrideTotal:'', chargeReason:'' };
 }
 
 function loadState() {
@@ -86,7 +89,10 @@ function loadState() {
           name: f.name || `Flavor ${index + 1}`,
           stock: Math.max(0, Number(f.stock || 0)),
           active: f.active !== false,
-          brotherShare: validMoney(f.brotherShare) ? Number(f.brotherShare) : legacyShare
+          brotherShare: validMoney(f.brotherShare) ? Number(f.brotherShare) : legacyShare,
+          size: f.size || 'Regular',
+          priceCash: validMoney(f.priceCash) && Number(f.priceCash) >= 0 ? Number(f.priceCash) : BASE_PRICE,
+          priceTap: validMoney(f.priceTap) && Number(f.priceTap) >= 0 ? Number(f.priceTap) : TAP_PRICE
         }))
       : base.flavors;
 
@@ -114,6 +120,9 @@ function loadState() {
       discountReason: o.discountReason || '',
       dealId: o.dealId || o.dealSnapshot?.id || '',
       dealSnapshot: o.dealSnapshot || null,
+      chargeEnabled: !!o.chargeEnabled || validMoney(o.priceOverrideTotal) && o.priceOverrideTotal !== '',
+      priceOverrideTotal: validMoney(o.priceOverrideTotal) && o.priceOverrideTotal !== '' ? Number(o.priceOverrideTotal) : '',
+      chargeReason: o.chargeReason || '',
       items: normalizeItems(o.items)
     })) : [];
 
@@ -143,7 +152,10 @@ function loadState() {
         discountAmount: Math.max(0, Number(s.discountAmount || 0)),
         discountReason: s.discountReason || '',
         dealId: s.dealId || s.dealSnapshot?.id || '',
-        dealSnapshot: s.dealSnapshot || null
+        dealSnapshot: s.dealSnapshot || null,
+        chargeEnabled: !!s.chargeEnabled || validMoney(s.priceOverrideTotal) && s.priceOverrideTotal !== '',
+        priceOverrideTotal: validMoney(s.priceOverrideTotal) && s.priceOverrideTotal !== '' ? Number(s.priceOverrideTotal) : '',
+        chargeReason: s.chargeReason || ''
       };
     }) : [];
 
@@ -194,6 +206,7 @@ function dateText(value) {
 }
 
 function activeFlavors() { return state.flavors.filter(f => f.active); }
+function deletedFlavors() { return state.flavors.filter(f => !f.active); }
 function flavorById(id) { return state.flavors.find(f => f.id === id); }
 function activeDeals() { return (state.deals || []).filter(d => d.active !== false); }
 function dealById(id) { return (state.deals || []).find(d => d.id === id); }
@@ -203,6 +216,16 @@ function paymentLabel(method) { return PAYMENT_LABELS[method] || 'Unknown'; }
 function unitPriceForMethod(method) { return method === 'tap' ? TAP_PRICE : BASE_PRICE; }
 function orderPaid(order) { return (order.paymentMethod || 'unpaid') !== 'unpaid'; }
 function flavorBrotherShare(flavorId) { return Number(flavorById(flavorId)?.brotherShare ?? DEFAULT_BROTHER_SHARE); }
+function flavorPrice(flavorId, method = 'cash') {
+  const f = flavorById(flavorId);
+  return Number(method === 'tap' ? (f?.priceTap ?? TAP_PRICE) : (f?.priceCash ?? BASE_PRICE));
+}
+function flavorLabel(f) { return `${f?.name || 'Cookie'}${f?.size && f.size !== 'Regular' ? ' · ' + f.size : ''}`; }
+function itemUnitPrice(item, method) {
+  if (method === 'tap') return Number(item.priceTap ?? flavorPrice(item.flavorId, 'tap'));
+  return Number(item.priceCash ?? flavorPrice(item.flavorId, 'cash'));
+}
+function itemsSubtotal(items, method = 'cash') { return roundMoney((items || []).reduce((sum, i) => sum + Number(i.qty || 0) * itemUnitPrice(i, method), 0)); }
 
 function localDateKey(value) {
   const date = value instanceof Date ? value : new Date(value);
@@ -269,21 +292,22 @@ function totalBrotherPaid() { return state.brotherPayments.reduce((s, p) => s + 
 function brotherBalance() { return totalBrotherOwed() - totalBrotherPaid(); }
 
 function itemsQty(items) { return (items || []).reduce((s, i) => s + Number(i.qty || 0), 0); }
-function itemsTotal(items, method = 'cash') { return roundMoney(itemsQty(items) * unitPriceForMethod(method)); }
+function itemsTotal(items, method = 'cash') { return itemsSubtotal(items, method); }
 function brotherForItems(items) {
   return roundMoney((items || []).reduce((sum, i) => sum + Number(i.qty || 0) * Number(i.brotherShare ?? flavorBrotherShare(i.flavorId)), 0));
 }
-function dealDiscount(deal) {
+function dealDiscount(deal, items = null) {
   if (!deal) return 0;
-  return roundMoney(Number(deal.qty || 0) * BASE_PRICE - Number(deal.price || 0));
+  const regular = items ? itemsSubtotal(items, 'cash') : Number(deal.qty || 0) * BASE_PRICE;
+  return roundMoney(regular - Number(deal.price || 0));
 }
 function pricingDeal(pricing) {
   return pricing?.dealSnapshot || dealById(pricing?.dealId || '') || null;
 }
 function pricingBreakdown(pricing, items, method = 'cash') {
   const qty = itemsQty(items);
-  const unitPrice = unitPriceForMethod(method);
-  const baseTotal = roundMoney(qty * unitPrice);
+  const unitPrice = qty ? roundMoney(itemsSubtotal(items, method) / qty) : unitPriceForMethod(method);
+  const baseTotal = itemsSubtotal(items, method);
   const baseBrother = brotherForItems(items);
   const mode = pricing?.pricingMode || 'none';
   let discount = 0;
@@ -298,22 +322,32 @@ function pricingBreakdown(pricing, items, method = 'cash') {
     if (!deal) error = 'Choose a custom deal.';
     else if (qty !== Number(deal.qty || 0)) error = `${deal.name} requires exactly ${deal.qty} cookies.`;
     else {
-      discount = dealDiscount(deal);
-      if (!(discount > 0)) error = 'This deal does not create a discount.';
+      discount = dealDiscount(deal, items);
+      if (!(discount > 0)) error = 'This deal does not create a discount for these cookies.';
     }
   }
-
-  if (!error && discount > baseBrother + 0.001) {
-    error = `Discount is too large. Your brother's cut for these cookies is ${money(baseBrother)}, so the discount cannot be more than that.`;
-  }
-  if (!error && discount > baseTotal + 0.001) error = 'Discount cannot be more than the sale total.';
+  if (!error && discount > baseBrother + 0.001) error = `Discount exceeds brother's ${money(baseBrother)} share.`;
+  if (!error && discount > baseTotal + 0.001) error = 'Discount cannot exceed the price.';
   if (!error && discount > 0 && !String(pricing?.discountReason || '').trim()) error = 'Enter a reason for the discount.';
 
-  const total = roundMoney(Math.max(0, baseTotal - discount));
+  const defaultTotal = roundMoney(Math.max(0, baseTotal - discount));
   const brotherTotal = roundMoney(Math.max(0, baseBrother - discount));
+  const hasOverride = !!pricing?.chargeEnabled || (pricing?.priceOverrideTotal !== '' && validMoney(pricing?.priceOverrideTotal));
+  const enteredTotal = pricing?.priceOverrideTotal;
+  let total = defaultTotal;
+  if (hasOverride) {
+    if (enteredTotal === '' || enteredTotal == null || !validMoney(enteredTotal) || Number(enteredTotal) < 0) {
+      if (!error) error = 'Enter a valid final customer charge.';
+    } else {
+      total = roundMoney(Number(enteredTotal));
+      if (total + 0.001 < brotherTotal && !error) error = 'The customer charge cannot be less than the brother payout.';
+    }
+    if (!String(pricing?.chargeReason || '').trim() && !error) error = 'Enter why the price was adjusted.';
+  }
   const profit = roundMoney(total - brotherTotal);
-  return { mode, qty, unitPrice, baseTotal, baseBrother, discount, total, brotherTotal, profit, deal, error };
+  return { mode, qty, unitPrice, baseTotal, baseBrother, discount, defaultTotal, total, brotherTotal, profit, deal, error, hasOverride };
 }
+
 function pricingLabel(pricing) {
   if ((pricing?.pricingMode || 'none') === 'deal') {
     const deal = pricingDeal(pricing);
@@ -323,7 +357,7 @@ function pricingLabel(pricing) {
   return 'No discount';
 }
 function itemSummary(items) {
-  return (items || []).filter(i => i.qty > 0).map(i => `${i.qty}× ${flavorById(i.flavorId)?.name || 'Cookie'}`).join(' · ');
+  return (items || []).filter(i => i.qty > 0).map(i => `${i.qty}× ${i.nameSnapshot ? i.nameSnapshot + (i.sizeSnapshot && i.sizeSnapshot !== 'Regular' ? ' · ' + i.sizeSnapshot : '') : flavorLabel(flavorById(i.flavorId))}`).join(' · ');
 }
 
 function navTo(view) {
@@ -353,8 +387,8 @@ function renderHome() {
           <div class="big">${totalOnHand() - totalReserved()}</div>
         </div>
         <div style="text-align:right">
-          <div class="label">PRICE</div>
-          <div style="font-size:22px;font-weight:900;margin-top:4px">$6 · $7 tap</div>
+          <div class="label">PRODUCTS</div>
+          <div style="font-size:18px;font-weight:900;margin-top:4px">Regular + Jumbo</div>
         </div>
       </div>
       <div class="mini">
@@ -394,7 +428,7 @@ function compactFlavor(f) {
   const klass = avail <= state.settings.lowStock ? 'stock-low' : reserved ? 'stock-reserved' : '';
   return `<div class="list-card flavor-row">
     <div class="cookie-dot">🍪</div>
-    <div><div class="flavor-name">${esc(f.name)}</div><div class="meta">${f.stock} on hand${reserved ? ` · ${reserved} reserved` : ''} · Brother ${money(f.brotherShare)}</div></div>
+    <div><div class="flavor-name">${esc(flavorLabel(f))}</div><div class="meta">${money(f.priceCash ?? BASE_PRICE)} cash · ${f.stock} on hand${reserved ? ` · ${reserved} reserved` : ''} · Brother ${money(f.brotherShare)}</div></div>
     <div><div class="stock-num ${klass}">${avail}</div><div class="meta" style="text-align:right">available</div></div>
   </div>`;
 }
@@ -409,18 +443,20 @@ function renderInventory() {
         return `<div class="list-card">
           <div class="flavor-row">
             <div class="cookie-dot">🍪</div>
-            <div><div class="flavor-name">${esc(f.name)}</div><div class="meta">${reserved ? `${reserved} reserved · ` : ''}${avail} available · Brother gets ${money(f.brotherShare)}</div></div>
+            <div><div class="flavor-name">${esc(flavorLabel(f))}</div><div class="meta">${money(f.priceCash ?? BASE_PRICE)} cash · ${reserved ? `${reserved} reserved · ` : ''}${avail} available · Brother gets ${money(f.brotherShare)}</div></div>
             <div class="stock-num">${f.stock}</div>
           </div>
           <div class="row-actions">
             <button class="btn secondary small" onclick="adjustStock('${f.id}', 1)">+1</button>
             <button class="btn secondary small" onclick="adjustStock('${f.id}', 6)">+6</button>
             <button class="btn ghost small" onclick="openStockModal('${f.id}')">Adjust</button>
+            <button class="btn ghost small" onclick="openEditFlavor('${f.id}')">Edit</button>
+            ${f.size !== 'Jumbo (8 oz)' && !flavorNameExists(f.name,null,'Jumbo (8 oz)') ? `<button class="btn ghost small" onclick="openAddJumbo('${f.id}')">+ Jumbo</button>` : ''}
           </div>
         </div>`;
       }).join('')}
     </div>
-    <button class="btn ghost full" style="margin-top:12px" onclick="openAddFlavor()">＋ Add flavor</button>
+    <button class="btn ghost full" style="margin-top:12px" onclick="openAddFlavor()">＋ Add cookie (Regular or Jumbo)</button>
   `;
 }
 
@@ -477,7 +513,7 @@ function renderQtyRows(draftName) {
     const available = availableFor(f.id, draftName === 'order' ? editingOrderId : null);
     const stockText = Number.isFinite(capacity) ? `${available} available` : `${available} available · can wait for stock`;
     return `<div class="qty-line">
-      <div><div class="flavor-name">${esc(f.name)}</div><div class="meta">${stockText} · Brother ${money(f.brotherShare)}</div></div>
+      <div><div class="flavor-name">${esc(flavorLabel(f))}</div><div class="meta">${stockText} · ${money(f.priceCash ?? BASE_PRICE)} cash · Brother ${money(f.brotherShare)}</div></div>
       <button class="qty-button" onclick="changeDraftQty('${draftName}','${f.id}',-1)">−</button>
       <div class="qty-value">${qty}</div>
       <button class="qty-button plus" onclick="changeDraftQty('${draftName}','${f.id}',1)">＋</button>
@@ -494,6 +530,8 @@ function captureSellMeta() {
   sellMeta.discountAmount = $('#saleDiscountAmount')?.value ?? sellMeta.discountAmount;
   sellMeta.discountReason = $('#saleDiscountReason')?.value ?? sellMeta.discountReason;
   sellMeta.dealId = $('#saleDealSelect')?.value ?? sellMeta.dealId;
+  sellMeta.priceOverrideTotal = $('#saleChargeTotal')?.value ?? sellMeta.priceOverrideTotal;
+  sellMeta.chargeReason = $('#saleChargeReason')?.value ?? sellMeta.chargeReason;
 }
 
 function captureOrderMeta() {
@@ -505,6 +543,8 @@ function captureOrderMeta() {
   orderMeta.discountAmount = $('#orderDiscountAmount')?.value ?? orderMeta.discountAmount;
   orderMeta.discountReason = $('#orderDiscountReason')?.value ?? orderMeta.discountReason;
   orderMeta.dealId = $('#orderDealSelect')?.value ?? orderMeta.dealId;
+  orderMeta.priceOverrideTotal = $('#orderChargeTotal')?.value ?? orderMeta.priceOverrideTotal;
+  orderMeta.chargeReason = $('#orderChargeReason')?.value ?? orderMeta.chargeReason;
 }
 
 function changeDraftQty(type, flavorId, delta) {
@@ -520,7 +560,7 @@ function paymentButtons(selected, target) {
   const methods = target === 'sell' ? ['cash', 'apple', 'tap'] : ['unpaid', 'cash', 'apple', 'tap'];
   if (selected === 'legacy' && !methods.includes('legacy')) methods.unshift('legacy');
   return `<div class="payment-grid">${methods.map(method => {
-    const priceText = method === 'tap' ? '$7 each' : method === 'unpaid' ? '$6 when paid' : method === 'legacy' ? '$6 each' : '$6 each';
+    const priceText = method === 'tap' ? 'Tap price per cookie' : method === 'unpaid' ? 'Cash price until paid' : 'Cookie-specific prices';
     return `<button type="button" class="payment-choice ${selected === method ? 'selected' : ''}" onclick="${target === 'sell' ? `setSalePayment('${method}')` : `setOrderPayment('${method}')`}">
       <span class="payment-title">${esc(paymentLabel(method))}</span><span class="payment-sub">${priceText}</span>
     </button>`;
@@ -559,6 +599,11 @@ function setOrderDeal(dealId) {
   orderMeta.dealId = dealId;
   orderMeta.dealSnapshot = null;
   renderOrderComposer();
+}
+
+function toggleCustomCharge(target) {
+  if (target === 'sell') { captureSellMeta(); sellMeta.chargeEnabled = !sellMeta.chargeEnabled; sellMeta.priceOverrideTotal = ''; renderSell(); }
+  else { captureOrderMeta(); orderMeta.chargeEnabled = !orderMeta.chargeEnabled; orderMeta.priceOverrideTotal = ''; renderOrderComposer(); }
 }
 
 function refreshSalePricing() {
@@ -604,6 +649,14 @@ function pricingControls(meta, target, items, method) {
       <div><span>Your profit</span><strong>${money(breakdown.profit)}</strong></div>
       ${breakdown.error ? `<p>${esc(breakdown.error)}</p>` : '<p>Your profit stays the same. The entire discount comes out of your brother’s cut.</p>'}
     </div>` : ''}
+    <div class="field" style="margin-top:12px">
+      <button type="button" class="btn ghost small" onclick="toggleCustomCharge('${target}')">${meta.chargeEnabled ? '− Remove custom charge' : '+ Custom charge'}</button>
+      ${meta.chargeEnabled ? `<div class="charge-override">
+        <label>Actual customer total</label><div class="money-input"><span>$</span><input id="${prefix}ChargeTotal" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" value="${esc(meta.priceOverrideTotal)}" onchange="${target === 'sell' ? 'refreshSalePricing()' : 'refreshOrderPricing()'}"></div>
+        <label>Reason for charge adjustment</label><input id="${prefix}ChargeReason" placeholder="Price adjustment note" value="${esc(meta.chargeReason || '')}">
+        <div class="field-hint">Actual charge and actual profit are saved in Money and exported records. Brother's fixed payout does not change.</div>
+      </div>` : ''}
+    </div>
   </div>`;
 }
 
@@ -611,11 +664,10 @@ function renderSell() {
   const items = draftItems(sellDraft);
   const qty = itemsQty(items);
   const breakdown = pricingBreakdown(sellMeta, items, sellMeta.paymentMethod);
-  const invalidPricing = sellMeta.pricingMode !== 'none' && !!breakdown.error;
   main.innerHTML = `
     <div class="form-card">
       <h2>Choose cookies</h2>
-      <div class="meta" style="margin-bottom:8px">Cash and Apple Pay are $6 each. Tap to Pay is $7 each.</div>
+      <div class="meta" style="margin-bottom:8px">Each cookie has its own cash, Apple Pay, and Tap to Pay price.</div>
       ${renderQtyRows('sell')}
     </div>
 
@@ -625,8 +677,8 @@ function renderSell() {
       ${pricingControls(sellMeta, 'sell', items, sellMeta.paymentMethod)}
     </div>
 
-    <div class="summary-strip"><div><div class="meta">${qty} COOKIE${qty === 1 ? '' : 'S'}${breakdown.discount ? ` · ${money(breakdown.discount)} OFF` : ` · ${money(breakdown.unitPrice)} EACH`}</div><strong>${money(breakdown.total)}</strong>${breakdown.discount ? `<div class="meta"><s>${money(breakdown.baseTotal)}</s> regular</div>` : ''}</div><div style="text-align:right"><div class="meta">BROTHER GETS</div><strong>${money(breakdown.brotherTotal)}</strong><div class="meta">Mine ${money(breakdown.profit)}</div></div></div>
-    <button class="btn primary full" ${qty && !invalidPricing ? '' : 'disabled'} onclick="recordSale()">Complete sale</button>
+    <div class="summary-strip"><div><div class="meta">${qty} COOKIE${qty === 1 ? '' : 'S'}${breakdown.discount ? ` · ${money(breakdown.discount)} OFF` : ''}</div><strong>${money(breakdown.total)}</strong>${breakdown.discount ? `<div class="meta"><s>${money(breakdown.baseTotal)}</s> regular</div>` : ''}</div><div style="text-align:right"><div class="meta">BROTHER GETS</div><strong>${money(breakdown.brotherTotal)}</strong><div class="meta">Mine ${money(breakdown.profit)}</div></div></div>
+    <button class="btn primary full" ${qty ? '' : 'disabled'} onclick="recordSale()">Complete sale</button>
     <button class="btn ghost full" style="margin-top:8px" onclick="clearSaleDraft()">Clear</button>
   `;
 }
@@ -638,7 +690,10 @@ function clearSaleDraft() {
 }
 
 function snapshotSaleItems(items) {
-  return items.map(i => ({ ...i, brotherShare: flavorBrotherShare(i.flavorId) }));
+  return items.map(i => {
+    const f = flavorById(i.flavorId);
+    return { ...i, brotherShare: flavorBrotherShare(i.flavorId), priceCash: flavorPrice(i.flavorId, 'cash'), priceTap: flavorPrice(i.flavorId, 'tap'), nameSnapshot: f?.name || 'Cookie', sizeSnapshot: f?.size || 'Regular' };
+  });
 }
 
 function recordSale() {
@@ -648,7 +703,7 @@ function recordSale() {
   for (const item of items) if (item.qty > availableFor(item.flavorId)) return toast(`Not enough ${flavorById(item.flavorId)?.name}.`);
   const saleItems = snapshotSaleItems(items);
   const breakdown = pricingBreakdown(sellMeta, saleItems, sellMeta.paymentMethod);
-  if (sellMeta.pricingMode !== 'none' && breakdown.error) return toast(breakdown.error);
+  if (breakdown.error) return toast(breakdown.error);
   items.forEach(i => flavorById(i.flavorId).stock -= i.qty);
   const deal = sellMeta.pricingMode === 'deal' ? pricingDeal(sellMeta) : null;
   const sale = {
@@ -663,6 +718,9 @@ function recordSale() {
     pricingMode: sellMeta.pricingMode || 'none',
     discountAmount: breakdown.discount,
     discountReason: breakdown.discount ? sellMeta.discountReason.trim() : '',
+    chargeEnabled: breakdown.hasOverride,
+    priceOverrideTotal: breakdown.hasOverride ? breakdown.total : '',
+    chargeReason: breakdown.hasOverride ? sellMeta.chargeReason.trim() : '',
     dealId: deal?.id || '',
     dealSnapshot: deal ? { id:deal.id, name:deal.name, qty:Number(deal.qty), price:Number(deal.price) } : null,
     createdAt: new Date().toISOString(),
@@ -710,6 +768,7 @@ function orderCard(order) {
     </div>
     <div class="order-items">${esc(itemSummary(order.items))}${details ? `<div class="order-detail-block">${details}</div>` : ''}${order.note ? `<div class="order-note">${esc(order.note)}</div>` : ''}</div>
     ${pricing.discount ? `<div class="discount-tag"><strong>${esc(pricingLabel(order))}</strong> · −${money(pricing.discount)}<br><span>${esc(order.discountReason || '')}</span></div>` : ''}
+    ${pricing.hasOverride ? `<div class="discount-tag">Custom charge · ${money(pricing.total)} · ${esc(order.chargeReason || '')}</div>` : ''}
     ${order.reserveMode === 'auto' ? `<div class="order-auto-note">${status === 'waiting' ? '⏳ Future order · auto-reserves when every cookie is available' : status === 'open' ? '✓ Future order · stock is reserved' : 'Future order'}</div>` : ''}
     <div style="margin-top:9px"><span class="status ${paymentClass}">${esc(paymentText)}</span></div>
     ${status === 'open' ? `<div class="order-actions">
@@ -756,7 +815,10 @@ function openEditOrder(orderId) {
     discountAmount: order.discountAmount || '',
     discountReason: order.discountReason || '',
     dealId: order.dealId || order.dealSnapshot?.id || '',
-    dealSnapshot: order.dealSnapshot || null
+    dealSnapshot: order.dealSnapshot || null,
+    chargeEnabled: !!order.chargeEnabled,
+    priceOverrideTotal: order.priceOverrideTotal ?? '',
+    chargeReason: order.chargeReason || ''
   };
   showModal('');
   renderOrderComposer();
@@ -798,19 +860,19 @@ function renderOrderComposer() {
     <div class="field"><label>Payment</label>${paymentButtons(method, 'order')}</div>
     ${pricingControls(orderMeta, 'order', items, method)}
     <div class="field"><label>Notes (optional)</label><textarea id="orderNote" placeholder="Class period, special instructions, reminder…">${esc(orderMeta.note)}</textarea></div>
-    <div class="summary-strip"><div><div class="meta">${qty} COOKIE${qty === 1 ? '' : 'S'}${breakdown.discount ? ` · ${money(breakdown.discount)} OFF` : ` · ${money(breakdown.unitPrice)} EACH`}</div><strong>${money(breakdown.total)}</strong>${breakdown.discount ? `<div class="meta"><s>${money(breakdown.baseTotal)}</s> regular</div>` : ''}</div><div style="text-align:right"><div class="meta">BROTHER GETS</div><strong>${money(breakdown.brotherTotal)}</strong><div class="meta">Mine ${money(breakdown.profit)}</div></div></div>
+    <div class="summary-strip"><div><div class="meta">${qty} COOKIE${qty === 1 ? '' : 'S'}${breakdown.discount ? ` · ${money(breakdown.discount)} OFF` : ''}</div><strong>${money(breakdown.total)}</strong>${breakdown.discount ? `<div class="meta"><s>${money(breakdown.baseTotal)}</s> regular</div>` : ''}</div><div style="text-align:right"><div class="meta">BROTHER GETS</div><strong>${money(breakdown.brotherTotal)}</strong><div class="meta">Mine ${money(breakdown.profit)}</div></div></div>
     <button class="btn primary full" onclick="saveOrder()">${editingOrderId ? 'Save changes' : 'Save order'}</button>
   `, true);
 }
 
 function saveOrder() {
   captureOrderMeta();
-  const items = draftItems(orderDraft);
+  const items = snapshotSaleItems(draftItems(orderDraft));
   const customer = orderMeta.customer.trim();
   if (!customer) return toast('Enter the customer name.');
   if (!items.length) return toast('Choose at least one cookie.');
   const pricing = pricingBreakdown(orderMeta, items, orderMeta.paymentMethod || 'unpaid');
-  if (orderMeta.pricingMode !== 'none' && pricing.error) return toast(pricing.error);
+  if (pricing.error) return toast(pricing.error);
   const selectedDeal = orderMeta.pricingMode === 'deal' ? pricingDeal(orderMeta) : null;
   const dealSnapshot = selectedDeal ? { id:selectedDeal.id, name:selectedDeal.name, qty:Number(selectedDeal.qty), price:Number(selectedDeal.price) } : null;
   if (orderMeta.reserveMode !== 'auto') {
@@ -836,6 +898,9 @@ function saveOrder() {
       pricingMode: orderMeta.pricingMode || 'none',
       discountAmount: pricing.discount,
       discountReason: pricing.discount ? orderMeta.discountReason.trim() : '',
+      chargeEnabled: pricing.hasOverride,
+      priceOverrideTotal: pricing.hasOverride ? pricing.total : '',
+      chargeReason: pricing.hasOverride ? orderMeta.chargeReason.trim() : '',
       dealId: selectedDeal?.id || '',
       dealSnapshot,
       reserveMode: orderMeta.reserveMode,
@@ -866,6 +931,9 @@ function saveOrder() {
     pricingMode: orderMeta.pricingMode || 'none',
     discountAmount: pricing.discount,
     discountReason: pricing.discount ? orderMeta.discountReason.trim() : '',
+    chargeEnabled: pricing.hasOverride,
+    priceOverrideTotal: pricing.hasOverride ? pricing.total : '',
+    chargeReason: pricing.hasOverride ? orderMeta.chargeReason.trim() : '',
     dealId: selectedDeal?.id || '',
     dealSnapshot,
     paymentMethod: orderMeta.paymentMethod,
@@ -890,8 +958,8 @@ function openOrderPayment(orderId) {
   const selected = order.paymentMethod || (order.paid ? 'legacy' : 'unpaid');
   showModal(`
     <div class="modal-head"><div><div class="meta">ORDER PAYMENT</div><h2>${esc(order.customer)}</h2></div><button class="modal-close" onclick="closeModal()">×</button></div>
-    <div class="setting-desc" style="margin-bottom:12px">Choose how this order was paid. Tap to Pay changes the order to $7 per cookie.</div>
-    <div class="payment-grid">${['unpaid','cash','apple','tap'].map(method => `<button type="button" class="payment-choice ${selected === method ? 'selected' : ''}" onclick="setOrderPaymentQuick('${order.id}','${method}')"><span class="payment-title">${esc(paymentLabel(method))}</span><span class="payment-sub">${method === 'tap' ? '$7 each' : method === 'unpaid' ? 'Not collected' : '$6 each'}</span></button>`).join('')}</div>
+    <div class="setting-desc" style="margin-bottom:12px">Choose how this order was paid. Payment choice uses each cookie’s configured price. Custom charges stay unchanged.</div>
+    <div class="payment-grid">${['unpaid','cash','apple','tap'].map(method => `<button type="button" class="payment-choice ${selected === method ? 'selected' : ''}" onclick="setOrderPaymentQuick('${order.id}','${method}')"><span class="payment-title">${esc(paymentLabel(method))}</span><span class="payment-sub">${method === 'tap' ? 'Tap prices' : method === 'unpaid' ? 'Not collected' : 'Cookie prices'}</span></button>`).join('')}</div>
   `);
 }
 
@@ -906,6 +974,7 @@ function setOrderPaymentQuick(orderId, method) {
     if (sale) {
       sale.paymentMethod = method;
       sale.paid = method !== 'unpaid';
+      if (sale.items.some(i => i.priceCash == null)) sale.items = sale.items.map(i => ({...i, priceCash:BASE_PRICE, priceTap:TAP_PRICE}));
       const pricing = pricingBreakdown(sale, sale.items, method);
       sale.unitPrice = pricing.unitPrice;
       sale.total = pricing.total;
@@ -926,9 +995,9 @@ function fulfillOrder(orderId) {
     if (!f || f.stock < item.qty) return toast(`Not enough ${f?.name || 'stock'} on hand.`);
   }
   const method = order.paymentMethod || (order.paid ? 'legacy' : 'unpaid');
-  const saleItems = snapshotSaleItems(order.items);
+  const saleItems = order.items.map(i => i.priceCash != null ? {...i} : {...i, priceCash:BASE_PRICE, priceTap:TAP_PRICE, brotherShare:Number(i.brotherShare ?? flavorBrotherShare(i.flavorId))});
   const pricing = pricingBreakdown(order, saleItems, method);
-  if (order.pricingMode !== 'none' && pricing.error) return toast(pricing.error);
+  if (pricing.error) return toast(pricing.error);
 
   order.items.forEach(i => flavorById(i.flavorId).stock -= i.qty);
   order.status = 'fulfilled';
@@ -945,6 +1014,9 @@ function fulfillOrder(orderId) {
     pricingMode: order.pricingMode || 'none',
     discountAmount: pricing.discount,
     discountReason: pricing.discount ? order.discountReason || '' : '',
+    chargeEnabled: pricing.hasOverride,
+    priceOverrideTotal: pricing.hasOverride ? pricing.total : '',
+    chargeReason: pricing.hasOverride ? order.chargeReason || '' : '',
     dealId: order.dealId || order.dealSnapshot?.id || '',
     dealSnapshot: order.dealSnapshot || null,
     createdAt: order.fulfilledAt,
@@ -1016,24 +1088,26 @@ function restoreOrder(orderId) {
 function salesByFlavor(sales = state.sales) {
   const map = new Map(state.flavors.map(f => [f.id, { qty:0, revenue:0, brother:0 }]));
   sales.forEach(sale => {
-    const qtyTotal = Math.max(1, itemsQty(sale.items));
-    const unitPrice = Number(sale.unitPrice || (itemsQty(sale.items) ? (Number(sale.total || 0) + Number(sale.discountAmount || 0)) / itemsQty(sale.items) : BASE_PRICE));
-    const discount = Number(sale.discountAmount || 0);
-    const baseBrotherTotal = brotherForItems(sale.items);
-    sale.items.forEach(i => {
-      const current = map.get(i.flavorId) || { qty:0, revenue:0, brother:0 };
+    const items = sale.items || [];
+    const qtyTotal = Math.max(1, itemsQty(items));
+    const method = sale.paymentMethod || 'cash';
+    const hasSnapshots = items.every(i => i.priceCash != null && i.priceTap != null);
+    const rawWeights = items.map(i => hasSnapshots ? Number(i.qty || 0) * itemUnitPrice(i, method) : Number(i.qty || 0) * Number(sale.unitPrice || BASE_PRICE));
+    const sumWeights = rawWeights.reduce((a,b) => a+b, 0) || qtyTotal;
+    const baseBrother = brotherForItems(items);
+    items.forEach((i, index) => {
+      const current = map.get(i.flavorId) || {qty:0,revenue:0,brother:0};
       const itemQty = Number(i.qty || 0);
-      const itemBaseRevenue = itemQty * unitPrice;
-      const revenueDiscount = discount * (itemQty / qtyTotal);
-      const itemBaseBrother = itemQty * Number(i.brotherShare ?? flavorBrotherShare(i.flavorId));
-      const brotherDiscount = baseBrotherTotal > 0 ? discount * (itemBaseBrother / baseBrotherTotal) : 0;
+      const share = rawWeights[index] > 0 ? rawWeights[index] / sumWeights : itemQty / qtyTotal;
+      const itemBrotherBase = itemQty * Number(i.brotherShare ?? flavorBrotherShare(i.flavorId));
+      const brotherDiscount = baseBrother > 0 ? Number(sale.discountAmount || 0) * itemBrotherBase / baseBrother : 0;
       current.qty += itemQty;
-      current.revenue += itemBaseRevenue - revenueDiscount;
-      current.brother += Math.max(0, itemBaseBrother - brotherDiscount);
-      map.set(i.flavorId, current);
+      current.revenue += Number(sale.total || 0) * share;
+      current.brother += Math.max(0, itemBrotherBase - brotherDiscount);
+      map.set(i.flavorId,current);
     });
   });
-  return activeFlavors().map(f => ({ f, ...(map.get(f.id) || { qty:0, revenue:0, brother:0 }) })).sort((a, b) => b.qty - a.qty);
+  return activeFlavors().map(f => ({f,...(map.get(f.id)||{qty:0,revenue:0,brother:0})})).sort((a,b)=>b.qty-a.qty);
 }
 
 function paymentTotals(sales = state.sales) {
@@ -1134,7 +1208,7 @@ function renderMoney() {
     <div class="form-card">
       <h2>Sales by flavor · ${esc(periodLabel)}</h2>
       <table class="money-table"><thead><tr><th>Flavor</th><th>Sold</th><th>Sales</th><th>Brother</th><th>Mine</th></tr></thead><tbody>
-      ${rows.map(r => `<tr><td>${esc(r.f.name)}</td><td>${r.qty}</td><td>${money(r.revenue)}</td><td>${money(r.brother)}</td><td>${money(r.revenue - r.brother)}</td></tr>`).join('')}
+      ${rows.map(r => `<tr><td>${esc(flavorLabel(r.f))}</td><td>${r.qty}</td><td>${money(r.revenue)}</td><td>${money(r.brother)}</td><td>${money(r.revenue - r.brother)}</td></tr>`).join('')}
       </tbody></table>
     </div>
 
@@ -1146,9 +1220,9 @@ function renderMoney() {
 function saleCard(sale) {
   const method = sale.paymentMethod || (sale.paid ? 'legacy' : 'unpaid');
   const discount = Number(sale.discountAmount || 0);
-  const pricingNote = discount ? `<div class="discount-tag"><strong>${esc(pricingLabel(sale))}</strong> · −${money(discount)}<br><span>${esc(sale.discountReason || '')}</span></div>` : '';
+  const pricingNote = `${discount ? `<div class="discount-tag"><strong>${esc(pricingLabel(sale))}</strong> · −${money(discount)}<br><span>${esc(sale.discountReason || '')}</span></div>` : ''}${sale.chargeEnabled ? `<div class="discount-tag">Custom customer charge · ${money(sale.total)} · ${esc(sale.chargeReason || '')}</div>` : ''}`;
   return `<div class="list-card">
-    <div class="order-head"><div><div class="flavor-name">${esc(sale.customer || 'Quick sale')}</div><div class="meta">${dateText(sale.createdAt)} · ${esc(itemSummary(sale.items))}<br>${esc(paymentLabel(method))} · ${money(sale.unitPrice || BASE_PRICE)} each · Brother ${money(sale.brotherTotal ?? brotherForItems(sale.items))}</div></div><div style="text-align:right"><div class="order-total">${money(sale.total)}</div><span class="status ${sale.paid ? 'paid' : 'unpaid'}">${sale.paid ? 'PAID' : 'UNPAID'}</span></div></div>
+    <div class="order-head"><div><div class="flavor-name">${esc(sale.customer || 'Quick sale')}</div><div class="meta">${dateText(sale.createdAt)} · ${esc(itemSummary(sale.items))}<br>${esc(paymentLabel(method))} · ${money(sale.total)} customer charge · Brother ${money(sale.brotherTotal ?? brotherForItems(sale.items))}</div></div><div style="text-align:right"><div class="order-total">${money(sale.total)}</div><span class="status ${sale.paid ? 'paid' : 'unpaid'}">${sale.paid ? 'PAID' : 'UNPAID'}</span></div></div>
     ${pricingNote}
     ${!sale.paid ? `<div class="order-actions"><button class="btn green small" onclick="openSalePayment('${sale.id}')">Collect payment</button></div>` : ''}
   </div>`;
@@ -1159,8 +1233,8 @@ function openSalePayment(saleId) {
   if (!sale) return;
   showModal(`
     <div class="modal-head"><div><div class="meta">COLLECT PAYMENT</div><h2>${esc(sale.customer || 'Sale')}</h2></div><button class="modal-close" onclick="closeModal()">×</button></div>
-    <div class="setting-desc" style="margin-bottom:12px">Choose how they paid. Tap to Pay changes this sale to $7 per cookie.</div>
-    <div class="payment-grid">${['cash','apple','tap'].map(method => `<button class="payment-choice" onclick="markSalePaid('${sale.id}','${method}')"><span class="payment-title">${esc(paymentLabel(method))}</span><span class="payment-sub">${method === 'tap' ? '$7 each' : '$6 each'}</span></button>`).join('')}</div>
+    <div class="setting-desc" style="margin-bottom:12px">Choose how they paid. Payment method may change the charge unless a custom total was set. Actual amounts remain in financial records.</div>
+    <div class="payment-grid">${['cash','apple','tap'].map(method => `<button class="payment-choice" onclick="markSalePaid('${sale.id}','${method}')"><span class="payment-title">${esc(paymentLabel(method))}</span><span class="payment-sub">${method === 'tap' ? 'Tap prices' : 'Cookie prices'}</span></button>`).join('')}</div>
   `);
 }
 
@@ -1169,8 +1243,11 @@ function markSalePaid(saleId, method = 'cash') {
   if (!sale) return;
   sale.paid = true;
   sale.paymentMethod = method;
+  if (sale.items.some(i => i.priceCash == null)) {
+    sale.items = sale.items.map(i => ({...i, priceCash:BASE_PRICE, priceTap:TAP_PRICE}));
+  }
   const pricing = pricingBreakdown(sale, sale.items, method);
-  if (sale.pricingMode !== 'none' && pricing.error) return toast(pricing.error);
+  if (pricing.error) return toast(pricing.error);
   sale.unitPrice = pricing.unitPrice;
   sale.total = pricing.total;
   sale.brotherTotal = pricing.brotherTotal;
@@ -1200,15 +1277,22 @@ function recordBrotherPayment() {
 function openSettings() {
   showModal(`
     <div class="modal-head"><div><div class="meta">COOKIE TRACKER</div><h2>Settings</h2></div><button class="modal-close" onclick="closeModal()">×</button></div>
-    <div class="setting-row"><div class="setting-title">Selling prices</div><div class="setting-desc">Cash and Apple Pay are fixed at $6.00 per cookie. Tap to Pay is $7.00 per cookie.</div></div>
+    <div class="setting-row"><div class="setting-title">Selling prices</div><div class="setting-desc">Prices are set for each cookie size and flavor. Regular defaults to $6 ($7 Tap); jumbo prices are editable.</div></div>
     <div class="setting-row">
-      <div class="setting-title">Brother commission by flavor</div>
+      <div class="setting-title">Brother commission by cookie</div>
       <div class="setting-desc">Set exactly how much your brother gets for each cookie sold. New sales lock in the commission at the time of the sale, so changing this later will not rewrite old sales.</div>
       <div class="commission-list">
-        ${activeFlavors().map(f => `<div class="commission-row"><label>${esc(f.name)}</label><div class="money-input"><span>$</span><input data-brother-share="${esc(f.id)}" type="number" min="0" max="6" step="0.01" inputmode="decimal" value="${Number(f.brotherShare ?? DEFAULT_BROTHER_SHARE).toFixed(2)}"></div></div>`).join('')}
+        ${activeFlavors().map(f => `<div class="commission-row"><label>${esc(f.name)}</label><div class="money-input"><span>$</span><input data-brother-share="${esc(f.id)}" type="number" min="0" max="${Number(f.priceCash ?? BASE_PRICE)}" step="0.01" inputmode="decimal" value="${Number(f.brotherShare ?? DEFAULT_BROTHER_SHARE).toFixed(2)}"></div></div>`).join('')}
       </div>
       <button class="btn secondary small" style="margin-top:10px" onclick="saveFlavorShares()">Save commissions</button>
     </div>
+    ${deletedFlavors().length ? `<div class="setting-row">
+      <div class="setting-title">Deleted cookies</div>
+      <div class="setting-desc">Deleted cookies stay here so old sales and orders keep their names. Restore one if you need to sell it again.</div>
+      <div class="deal-list">
+        ${deletedFlavors().map(f => `<div class="deal-row"><div><strong>${esc(f.name)}</strong><div class="meta">Brother ${money(f.brotherShare)}</div></div><button class="btn secondary small" onclick="restoreFlavor('${f.id}')">Restore</button></div>`).join('')}
+      </div>
+    </div>` : ''}
     <div class="setting-row">
       <div class="setting-title">Custom deals</div>
       <div class="setting-desc">Create deals such as 4 for $20. A deal is never applied automatically—you choose it on a sale or order. The deal discount comes entirely out of your brother's cut.</div>
@@ -1238,7 +1322,8 @@ function saveFlavorShares() {
   const inputs = [...document.querySelectorAll('[data-brother-share]')];
   for (const input of inputs) {
     const value = Number(input.value);
-    if (Number.isNaN(value) || value < 0 || value > BASE_PRICE) return toast('Each commission must be from $0 to $6.');
+    const f = flavorById(input.dataset.brotherShare);
+    if (Number.isNaN(value) || value < 0 || value > Number(f?.priceCash ?? BASE_PRICE)) return toast('Brother commission cannot exceed this cookie’s cash price.');
   }
   inputs.forEach(input => {
     const f = flavorById(input.dataset.brotherShare);
@@ -1284,25 +1369,125 @@ function saveLowStock() {
   toast('Low-stock warning updated');
 }
 
-function openAddFlavor() {
-  showModal(`
-    <div class="modal-head"><div><div class="meta">INVENTORY</div><h2>Add flavor</h2></div><button class="modal-close" onclick="closeModal()">×</button></div>
-    <div class="field"><label>Flavor name</label><input id="newFlavorName" placeholder="e.g. Red Velvet"></div>
-    <div class="field"><label>Brother gets per cookie</label><input id="newFlavorShare" type="number" min="0" max="6" step="0.01" inputmode="decimal" value="${DEFAULT_BROTHER_SHARE.toFixed(2)}"></div>
-    <button class="btn primary full" onclick="addFlavor()">Add flavor</button>
-  `);
+function flavorNameExists(name, excludeId = null, size = 'Regular') {
+  const target = String(name || '').trim().toLowerCase();
+  return state.flavors.some(f => f.id !== excludeId && f.active && String(f.name || '').trim().toLowerCase() === target && (f.size || 'Regular') === size);
 }
 
-function addFlavor() {
-  const name = $('#newFlavorName')?.value.trim();
-  const brotherShare = Number($('#newFlavorShare')?.value ?? DEFAULT_BROTHER_SHARE);
-  if (!name) return toast('Enter a flavor name.');
-  if (Number.isNaN(brotherShare) || brotherShare < 0 || brotherShare > BASE_PRICE) return toast('Brother commission must be from $0 to $6.');
-  state.flavors.push({ id:uid('flavor'), name, stock:0, active:true, brotherShare });
+function activeOrderReferencesFlavor(flavorId) {
+  return state.orders.some(o => ['open', 'waiting'].includes(o.status) && (o.items || []).some(i => i.flavorId === flavorId && Number(i.qty || 0) > 0));
+}
+
+function cookieFormFields(prefix, cookie) {
+  const f = cookie || { name:'', size:'Regular', priceCash: BASE_PRICE, priceTap:TAP_PRICE, brotherShare:DEFAULT_BROTHER_SHARE };
+  const cash = Number(f.priceCash ?? BASE_PRICE);
+  const brother = Number(f.brotherShare ?? DEFAULT_BROTHER_SHARE);
+  return `
+    <div class="field"><label>Cookie flavor</label><input id="${prefix}FlavorName" placeholder="e.g. Kinder" value="${esc(f.name)}" maxlength="60"></div>
+    <div class="field"><label>Size</label><select id="${prefix}FlavorSize"><option value="Regular" ${f.size !== 'Jumbo (8 oz)' ? 'selected' : ''}>Regular</option><option value="Jumbo (8 oz)" ${f.size === 'Jumbo (8 oz)' ? 'selected' : ''}>Jumbo (8 oz)</option></select></div>
+    <div class="two-col">
+      <div class="field"><label>Cash / Apple Pay price</label><div class="money-input"><span>$</span><input id="${prefix}PriceCash" type="number" min="0.01" step="0.01" inputmode="decimal" value="${cash.toFixed(2)}" oninput="syncSplitInputs('${prefix}','price')"></div></div>
+      <div class="field"><label>Tap to Pay price</label><div class="money-input"><span>$</span><input id="${prefix}PriceTap" type="number" min="0.01" step="0.01" inputmode="decimal" value="${Number(f.priceTap ?? TAP_PRICE).toFixed(2)}"></div></div>
+    </div>
+    <div class="two-col">
+      <div class="field"><label>Brother's cut</label><div class="money-input"><span>$</span><input id="${prefix}FlavorShare" type="number" min="0" step="0.01" inputmode="decimal" value="${brother.toFixed(2)}" oninput="syncSplitInputs('${prefix}','brother')"></div></div>
+      <div class="field"><label>My cut</label><div class="money-input"><span>$</span><input id="${prefix}MyCut" type="number" min="0" step="0.01" inputmode="decimal" value="${roundMoney(cash - brother).toFixed(2)}" oninput="syncSplitInputs('${prefix}','mine')"></div></div>
+    </div>
+    <div class="field-hint">The regular price is split between you and your brother. Tap to Pay extra goes to you. Changing either cut updates the other automatically.</div>`;
+}
+function syncSplitInputs(prefix, changed) {
+  const cash = Number($(`#${prefix}PriceCash`)?.value || 0);
+  const brotherInput = $(`#${prefix}FlavorShare`);
+  const mineInput = $(`#${prefix}MyCut`);
+  if (!brotherInput || !mineInput || !Number.isFinite(cash)) return;
+  if (changed === 'mine') brotherInput.value = roundMoney(Math.max(0, cash - Number(mineInput.value || 0))).toFixed(2);
+  else mineInput.value = roundMoney(Math.max(0, cash - Number(brotherInput.value || 0))).toFixed(2);
+}
+function readCookieFields(prefix, currentId = null) {
+  const name = $(`#${prefix}FlavorName`)?.value.trim() || '';
+  const size = $(`#${prefix}FlavorSize`)?.value || 'Regular';
+  const priceCash = Number($(`#${prefix}PriceCash`)?.value);
+  const priceTap = Number($(`#${prefix}PriceTap`)?.value);
+  const brotherShare = Number($(`#${prefix}FlavorShare`)?.value);
+  const mine = Number($(`#${prefix}MyCut`)?.value);
+  if (!name) return {error:'Enter a cookie name.'};
+  if (flavorNameExists(name, currentId, size)) return {error:'This flavor and size already exists.'};
+  if (!Number.isFinite(priceCash) || !Number.isFinite(priceTap) || priceCash <= 0 || priceTap <= 0) return {error:'Enter valid prices greater than $0.'};
+  if (!Number.isFinite(brotherShare) || brotherShare < 0 || brotherShare > priceCash) return {error:'Brother cut must be between $0 and the regular price.'};
+  if (!Number.isFinite(mine) || mine < 0 || Math.abs(roundMoney(mine + brotherShare - priceCash)) > .001) return {error:'Your cut plus brother cut must equal the regular price.'};
+  return { name, size, priceCash:roundMoney(priceCash), priceTap:roundMoney(priceTap), brotherShare:roundMoney(brotherShare) };
+}
+function openEditFlavor(flavorId) {
+  const f = flavorById(flavorId);
+  if (!f || !f.active) return;
+  showModal(`
+    <div class="modal-head"><div><div class="meta">COOKIE INVENTORY</div><h2>Edit cookie</h2></div><button class="modal-close" onclick="closeModal()">×</button></div>
+    ${cookieFormFields('edit', f)}
+    <button class="btn primary full" onclick="saveFlavorEdit('${f.id}')">Save changes</button>
+    <div class="danger-zone" style="margin-top:16px">
+      <div class="setting-title" style="color:var(--red)">Delete cookie</div>
+      <div class="setting-desc">Removes this cookie from new sales and orders, but preserves its sales history. Stock must be zero and no open/waiting orders may reference it.</div>
+      <button class="btn red small" style="margin-top:10px" onclick="deleteFlavor('${f.id}')">Delete ${esc(flavorLabel(f))}</button>
+    </div>`);
+}
+function saveFlavorEdit(flavorId) {
+  const f = flavorById(flavorId);
+  if (!f || !f.active) return;
+  const values = readCookieFields('edit', flavorId);
+  if (values.error) return toast(values.error);
+  Object.assign(f, values, {updatedAt:new Date().toISOString()});
+  saveState(); closeModal(); render(); toast(`${flavorLabel(f)} updated`);
+}
+
+function deleteFlavor(flavorId) {
+  const f = flavorById(flavorId);
+  if (!f || !f.active) return;
+  if (Number(f.stock || 0) > 0) return toast(`Set ${f.name} stock to 0 before deleting it.`);
+  if (activeOrderReferencesFlavor(flavorId)) return toast(`${f.name} is still used in an open or waiting order.`);
+  if (!confirm(`Delete ${f.name}? It will disappear from Inventory, Sales, and new Orders. Past history will stay saved.`)) return;
+  f.active = false;
+  f.deletedAt = new Date().toISOString();
+  delete sellDraft[flavorId];
+  delete orderDraft[flavorId];
   saveState();
   closeModal();
   render();
-  toast(`${name} added`);
+  toast(`${f.name} deleted`);
+}
+
+function restoreFlavor(flavorId) {
+  const f = flavorById(flavorId);
+  if (!f || f.active) return;
+  if (flavorNameExists(f.name, flavorId, f.size || 'Regular')) return toast(`Rename the active ${f.name} cookie first before restoring this one.`);
+  f.active = true;
+  delete f.deletedAt;
+  saveState();
+  openSettings();
+  toast(`${f.name} restored`);
+}
+
+function openAddJumbo(flavorId) {
+  const original = flavorById(flavorId);
+  if (!original) return;
+  if (flavorNameExists(original.name, null, 'Jumbo (8 oz)')) return toast('Jumbo already exists for this flavor.');
+  showModal(`
+    <div class="modal-head"><div><div class="meta">8 OZ OPTION</div><h2>Add jumbo cookie</h2></div><button class="modal-close" onclick="closeModal()">×</button></div>
+    ${cookieFormFields('new', { name:original.name, size:'Jumbo (8 oz)', priceCash:7, priceTap:8, brotherShare:5 })}
+    <button class="btn primary full" onclick="addFlavor()">Add jumbo cookie</button>
+  `);
+}
+function openAddFlavor() {
+  showModal(`
+    <div class="modal-head"><div><div class="meta">INVENTORY</div><h2>Add cookie</h2></div><button class="modal-close" onclick="closeModal()">×</button></div>
+    ${cookieFormFields('new', {name:'', size:'Regular', priceCash:BASE_PRICE, priceTap:TAP_PRICE, brotherShare:DEFAULT_BROTHER_SHARE})}
+    <button class="btn primary full" onclick="addFlavor()">Add cookie</button>
+  `);
+}
+function addFlavor() {
+  const values = readCookieFields('new');
+  if (values.error) return toast(values.error);
+  state.flavors.push({id:uid('flavor'), stock:0, active:true, ...values });
+  saveState(); closeModal(); render(); toast(`${flavorLabel(values)} added`);
 }
 
 function exportBackup() {
@@ -1311,7 +1496,7 @@ function exportBackup() {
 }
 
 function exportSalesCSV() {
-  const header = ['Date','Customer','Items','Quantity','Payment Method','Unit Price','Regular Total','Discount','Discount Type','Discount Reason','Total','Paid','Brother Total','My Profit'];
+  const header = ['Date','Customer','Items','Quantity','Payment Method','Average Unit Price','Regular Total','Discount','Discount Type','Discount Reason','Actual Charge','Paid','Brother Total','My Profit','Custom Charge','Custom Charge Reason'];
   const rows = state.sales.map(s => [
     new Date(s.createdAt).toLocaleString(),
     s.customer || 'Quick sale',
@@ -1326,7 +1511,9 @@ function exportSalesCSV() {
     Number(s.total || 0).toFixed(2),
     s.paid ? 'Yes' : 'No',
     Number(s.brotherTotal ?? brotherForItems(s.items)).toFixed(2),
-    (Number(s.total || 0) - Number(s.brotherTotal ?? brotherForItems(s.items))).toFixed(2)
+    (Number(s.total || 0) - Number(s.brotherTotal ?? brotherForItems(s.items))).toFixed(2),
+    s.chargeEnabled ? 'Yes' : 'No',
+    s.chargeReason || ''
   ]);
   const csv = [header, ...rows].map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
   downloadBlob(new Blob([csv], { type:'text/csv' }), `cookie-sales-${new Date().toISOString().slice(0, 10)}.csv`);
